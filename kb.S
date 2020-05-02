@@ -167,6 +167,7 @@ defcode "KBINIT",,KBINIT
   mov PS2_STATE_REG, r16
   rjmp KBDISABLE
 
+; Keyboard must be disabled (keyboard clock held low) during LCD operations.
 defcode "KBDISABLE",,KBDISABLE
   cli
   clr r16
