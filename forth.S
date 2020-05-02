@@ -83,13 +83,13 @@ main:
   ldi DS_LREG+1, hi8(DS0)
 
   ; Initialize the interpreter pointer
-  ldi IP_LREG, lo8(cold_start)
-  ldi IP_LREG+1, hi8(cold_start)
+  ldi IP_LREG, lo8(forth_main)
+  ldi IP_LREG+1, hi8(forth_main)
   ; Call NEXT to kick things off.
   rjmp NEXT
 
 ; The default program!
-cold_start:
+forth_main:
   ; Wait because the keyboard is noisy on the busy line (TODO: I think?)
   lit 0x3FFF
   fw WAIT
@@ -101,9 +101,27 @@ cold_start:
   fw TRUE
   fw LEDSTORE
 
-  fw QUIT
+  fw QUIT ; Never returns.
 
-; D: T R:
+defcode "RAMINIT",,RAMINIT
+  ldi ZL, lo8(__data_load_start)
+  ldi ZH, hi8(__data_load_start)
+  ldi XL, lo8(__data_start)
+  ldi XH, hi8(__data_start)
+1:
+  lpm r0, Z+
+  st X+, r0
+  ldi r16, lo8(__data_load_end)
+  ldi r17, hi8(__data_load_end)
+  sub r16, ZL
+  sbc r17, ZH
+  or r16, r17
+  brne 1b
+  rjmp NEXT
+
+; == DEBUGGING TOOLS ==
+
+; TICKS --
 defword "WAIT",,WAIT
 1:
   fw DECR ; D: T-1
@@ -163,6 +181,8 @@ defword "BLINK",,BLINK
   fw FALSE
   zbranch 1b
 
+; == STACK MANIPULATION ==
+
 defcode "DROP",,DROP
   adiw Y, 2
   rjmp NEXT
@@ -197,10 +217,6 @@ defcode "ROT",,ROT
   PUSHDSP 4
   rjmp NEXT
 
-defcode "EXIT",,EXIT
-  POPRSP IP_LREG
-  rjmp NEXT
-
 defword "-ROT",,NROT
   fw ROT
   fw ROT
@@ -216,31 +232,64 @@ defword "2DUP",,TWODUP
   fw OVER
   fw EXIT
 
-defcode "LIT",,LIT
-  ; Push the next word onto the data stack.
-  movw ZL, IP_LREG
-  adiw IP_LREG, 2
-  lpm r0, Z+
-  lpm r1, Z
+; == RETURN STACK MANIPULATION ==
+
+defcode ">R",,TOR
+  POPDSP 0
+  PUSHRSP 0
+  rjmp NEXT
+
+defcode "R>",,FROMR
+  POPRSP 0
   PUSHDSP 0
   rjmp NEXT
 
-defcode "ROMC@",,ROMFETCHBYTE
-  POPDSP 30
-  lpm r16, Z
-  ldi r17, 0
-  PUSHDSP 16
+defcode "RSP@",,RSPFETCH
+  in r0, _SFR_IO_ADDR(SPL)
+  in r1, _SFR_IO_ADDR(SPH)
+  PUSHDSP 0
   rjmp NEXT
 
-defword "ROM@",,ROMFETCH
-  fw DUP
-  fw ROMFETCHBYTE
-  fw SWAP
-  fw INCR
-  fw ROMFETCHBYTE
-  fw SWIZZLE
-  fw OR
-  fw EXIT
+defcode "RSP!",,RSPSTORE
+  POPDSP 0
+  out _SFR_IO_ADDR(SPL), r0
+  out _SFR_IO_ADDR(SPH), r1
+  rjmp NEXT
+
+defcode "RDROP",,RDROP
+  POPRSP 0
+  rjmp NEXT
+
+defcode "DSP@",,DSPFETCH
+  ; PUSHDSP isn't atomic, so need to buffer it via a different register.
+  movw r0, DS_LREG
+  PUSHDSP 0
+  rjmp NEXT
+
+defcode "DSP!",,DSPSTORE
+  ; POPDSP isn't atomic, so need to buffer it via a different register.
+  POPDSP 0
+  movw DS_LREG, r0
+  rjmp NEXT
+
+; Relative branch.
+defcode "0BRANCH",,ZBRANCH
+  ; Push the next word onto the data stack.
+  movw ZL, IP_LREG
+  ; TODO: This could just be a byte, but would require extending the byte into a
+  ; word.
+  lpm r0, Z+
+  lpm r1, Z+
+  POPDSP 2
+  or r2, r3
+  brne 1f  ; If top of stack is 0, we'll modify Z to branch.
+  add ZL, r0
+  adc ZH, r1
+1:
+  movw IP_LREG, ZL
+  rjmp NEXT
+
+; == ARITHMETIC ==
 
 defcode "+",,ADD
   POPDSP 0
@@ -374,6 +423,8 @@ defword "<",,LT
   fw ZLT
   fw EXIT
 
+; == MEMORY COMMANDS ==
+
 defcode "C!",,STOREBYTE
   POPDSP 30 ; address
   POPDSP 0 ; data
@@ -413,127 +464,24 @@ defword "@",,FETCH
   fw OR
   fw EXIT
 
-defvar "STATE",,STATE
-defvar "HERE",,HERE
-defvar "S0",,SZ,DS0
-
-defcode "RAMINIT",,RAMINIT
-  ldi ZL, lo8(__data_load_start)
-  ldi ZH, hi8(__data_load_start)
-  ldi XL, lo8(__data_start)
-  ldi XH, hi8(__data_start)
-1:
-  lpm r0, Z+
-  st X+, r0
-  ldi r16, lo8(__data_load_end)
-  ldi r17, hi8(__data_load_end)
-  sub r16, ZL
-  sbc r17, ZH
-  or r16, r17
-  brne 1b
+defcode "ROMC@",,ROMFETCHBYTE
+  POPDSP 30
+  lpm r16, Z
+  ldi r17, 0
+  PUSHDSP 16
   rjmp NEXT
 
-defconst "R0",,RZ,RS0
-defconst "DOCOL",,__DOCOL,DOCOL
-defconst "F_IMMED",,F_IMMED,0x80
-defconst "F_HIDDEN",,F_HIDDEN,0x20
-defconst "F_LENMASK",,F_LENMASK,0x1f
-defconst "TRUE",,TRUE,0xFFFF
-defconst "FALSE",,FALSE,0x0
-
-defstring "GREETING",,GREETING,"Hello, world!"
-
-defcode ">R",,TOR
-  POPDSP 0
-  PUSHRSP 0
-  rjmp NEXT
-
-defcode "R>",,FROMR
-  POPRSP 0
-  PUSHDSP 0
-  rjmp NEXT
-
-defcode "RSP@",,RSPFETCH
-  in r0, _SFR_IO_ADDR(SPL)
-  in r1, _SFR_IO_ADDR(SPH)
-  PUSHDSP 0
-  rjmp NEXT
-
-defcode "RSP!",,RSPSTORE
-  POPDSP 0
-  out _SFR_IO_ADDR(SPL), r0
-  out _SFR_IO_ADDR(SPH), r1
-  rjmp NEXT
-
-defcode "RDROP",,RDROP
-  POPRSP 0
-  rjmp NEXT
-
-defcode "DSP@",,DSPFETCH
-  ; PUSHDSP isn't atomic, so need to buffer it via a different register.
-  movw r0, DS_LREG
-  PUSHDSP 0
-  rjmp NEXT
-
-defcode "DSP!",,DSPSTORE
-  ; POPDSP isn't atomic, so need to buffer it via a different register.
-  POPDSP 0
-  movw DS_LREG, r0
-  rjmp NEXT
-
-; DUPs the return address so that a copy of the LOOP point still exists even
-; after EXITing from this word.
-defword "LOOP",,LOOP
-  fw FROMR
+defword "ROM@",,ROMFETCH
   fw DUP
-  fw TOR
-  fw TOR
-  fw EXIT
-
-; pred a b -- pred ? a : b
-defword "TERN",,TERN
-  fw DUP ; pred pred a b
-  fw ROT ; a pred pred b
-  fw AND ; a? pred b
-  fw NROT ; pred b a?
-  fw INVERT ; !pred b a?
-  fw AND ; b? a?
+  fw ROMFETCHBYTE
+  fw SWAP
+  fw INCR
+  fw ROMFETCHBYTE
+  fw SWIZZLE
   fw OR
   fw EXIT
 
-; Calculate the Nth triangle number with some awful stack manipulation.
-; n -- the nth triangle number
-defword "TRI",,TRI
-  lit 0 ; running sum
-  fw LOOP ; D: SUM N -- R: LOOP
-
-  fw OVER ; N SUM N
-  fw ADD  ; NSUM N
-  fw SWAP ; N NSUM
-  fw DECR ; N-1 NSUM
-  fw SWAP ; NSUM N-1
-  fw OVER ; N-1 NSUM N-1
-  fw ZEQU  ; ISZERO NSUM N-1
-  fw INVERT ; !ISZERO NSUM N-1
-  fw WHILE
-  fw RDROP
-
-  fw ADD ; Drop the arg (which is 0 now)
-  fw EXIT
-
-; Branches to the top of RSP if COND, else exits normally. Caller needs to RDROP
-; the loop point after the loop terminates.
-defword "WHILE",,WHILE
-  ; D: COND R: NORMAL IFTRUE
-  fw FROMR ; NORMAL COND
-  fw FROMR ; IFTRUE NORMAL COND
-  fw DUP
-  fw TOR   ; D: IFTRUE NORMAL COND R: IFTRUE
-  fw ROT   ; D: COND IFTRUE NORMAL R: IFTRUE
-  fw TERN  ; D: next R: IFTRUE
-  fw TOR
-  ; Maybe conditionally RDROP so the caller doesn't have to?
-  fw EXIT
+; == FLAGS ==
 
 ; FLAGSVAR FLAG --
 defword "SETFLAG",,SETFLAG
@@ -564,6 +512,62 @@ defword "CHECKFLAG",,CHECKFLAG
   fw ZEQU
   fw EXIT
 
+; DUPs the return address so that a copy of the LOOP point still exists even
+; after EXITing from this word.
+defword "LOOP",,LOOP
+  fw FROMR
+  fw DUP
+  fw TOR
+  fw TOR
+  fw EXIT
+
+; pred a b -- pred ? a : b
+defword "TERN",,TERN
+  fw DUP ; pred pred a b
+  fw ROT ; a pred pred b
+  fw AND ; a? pred b
+  fw NROT ; pred b a?
+  fw INVERT ; !pred b a?
+  fw AND ; b? a?
+  fw OR
+  fw EXIT
+
+; Branches to the top of RSP if COND, else exits normally. Caller needs to RDROP
+; the loop point after the loop terminates.
+defword "WHILE",,WHILE
+  ; D: COND R: NORMAL IFTRUE
+  fw FROMR ; NORMAL COND
+  fw FROMR ; IFTRUE NORMAL COND
+  fw DUP
+  fw TOR   ; D: IFTRUE NORMAL COND R: IFTRUE
+  fw ROT   ; D: COND IFTRUE NORMAL R: IFTRUE
+  fw TERN  ; D: next R: IFTRUE
+  fw TOR
+  ; Maybe conditionally RDROP so the caller doesn't have to?
+  fw EXIT
+
+; Calculate the Nth triangle number with some awful stack manipulation.
+; n -- the nth triangle number
+defword "TRI",,TRI
+  lit 0 ; running sum
+  fw LOOP ; D: SUM N -- R: LOOP
+
+  fw OVER ; N SUM N
+  fw ADD  ; NSUM N
+  fw SWAP ; N NSUM
+  fw DECR ; N-1 NSUM
+  fw SWAP ; NSUM N-1
+  fw OVER ; N-1 NSUM N-1
+  fw ZEQU  ; ISZERO NSUM N-1
+  fw INVERT ; !ISZERO NSUM N-1
+  fw WHILE
+  fw RDROP
+
+  fw ADD ; Drop the arg (which is 0 now)
+  fw EXIT
+
+; == I/O ==
+
 #define SBUF_SIZE 0x20
 
 defcode "SBUF",,SBUF
@@ -576,6 +580,8 @@ defcode "SBUF",,SBUF
 var_SBUF:
 .fill SBUF_SIZE, 1, 0
 .text
+
+defstring "GREETING",,GREETING,"Hello, world!"
 
 defword "WORD",,WORD
 1:
@@ -612,6 +618,62 @@ defword "WORD",,WORD
   fw SWAP ; length on top
   fw EXIT
 
+defword "EMIT",,EMIT
+  fw SWIZZLE   ; Put char in high byte.
+  fw LCD_RS_DR ; Data register.
+  fw OR
+  fw LCDCMD
+  fw EXIT
+
+defword "WRITEWORD",,WRITEWORD
+  lit 4
+1:
+  fw SWAP
+  fw DUP
+  ; Move to bottom nibble
+  fw SWIZZLE
+  fw ASR
+  fw ASR
+  fw ASR
+  fw ASR
+  fw TOHEX
+  fw EMIT
+  ; Shift left 4 bits to move to the next digit.
+  fw ASL
+  fw ASL
+  fw ASL
+  fw ASL
+  fw SWAP
+  fw DECR
+  fw DUP
+  fw ZEQU
+  zbranch 1b
+  fw DROP
+  fw DROP
+  fw EXIT
+
+; LEN ADDR --
+defword "TELL",,TELL
+1:
+  fw DUP
+  zbranch 2f
+  fw DECR
+  fw SWAP
+  fw DUP
+  fw FETCHBYTE
+  fw EMIT
+  fw INCR
+  fw SWAP
+  fw FALSE
+  zbranch 1b
+2:
+  fw DROP
+  fw DROP
+  fw EXIT
+
+; == STRINGS ==
+
+; Parses an ASCII value as a hex digit.
 ; DIGIT -- SUCCESS NUMBER
 defword "DIGIT",,DIGIT
   fw DUP
@@ -706,13 +768,6 @@ defword "NUMBER",,NUMBER
   fw TRUE
   fw EXIT
 
-defword "EMIT",,EMIT
-  fw SWIZZLE   ; Put char in high byte.
-  fw LCD_RS_DR ; Data register.
-  fw OR
-  fw LCDCMD
-  fw EXIT
-
 ; Lowest 4 bits to hex digit
 defword "TOHEX",,TOHEX
   lit 0x000F
@@ -728,69 +783,6 @@ defword "TOHEX",,TOHEX
   lit 'A' - 10
   fw ADD
   fw EXIT
-
-defword "WRITEWORD",,WRITEWORD
-  lit 4
-1:
-  fw SWAP
-  fw DUP
-  ; Move to bottom nibble
-  fw SWIZZLE
-  fw ASR
-  fw ASR
-  fw ASR
-  fw ASR
-  fw TOHEX
-  fw EMIT
-  ; Shift left 4 bits to move to the next digit.
-  fw ASL
-  fw ASL
-  fw ASL
-  fw ASL
-  fw SWAP
-  fw DECR
-  fw DUP
-  fw ZEQU
-  zbranch 1b
-  fw DROP
-  fw DROP
-  fw EXIT
-
-; LEN ADDR --
-defword "TELL",,TELL
-1:
-  fw DUP
-  zbranch 2f
-  fw DECR
-  fw SWAP
-  fw DUP
-  fw FETCHBYTE
-  fw EMIT
-  fw INCR
-  fw SWAP
-  fw FALSE
-  zbranch 1b
-2:
-  fw DROP
-  fw DROP
-  fw EXIT
-
-; Relative branch.
-defcode "0BRANCH",,ZBRANCH
-  ; Push the next word onto the data stack.
-  movw ZL, IP_LREG
-  ; TODO: This could just be a byte, but would require extending the byte into a
-  ; word.
-  lpm r0, Z+
-  lpm r1, Z+
-  POPDSP 2
-  or r2, r3
-  brne 1f  ; If top of stack is 0, we'll modify Z to branch.
-  add ZL, r0
-  adc ZH, r1
-1:
-  movw IP_LREG, ZL
-  rjmp NEXT
 
 ; TODO: Right now, ADDR1 must be in progmem. Maybe copy it into RAM?
 ; LEN1 ADDR1 LEN2 ADDR2 -- EQUAL
@@ -838,6 +830,34 @@ defword "STREQU",,STREQU
   fw NROT
   fw FALSE
   zbranch 1b
+
+; == INTERPRETING ==
+
+defvar "STATE",,STATE
+defvar "HERE",,HERE
+defvar "S0",,SZ,DS0
+
+defconst "R0",,RZ,RS0
+defconst "DOCOL",,__DOCOL,DOCOL
+defconst "F_IMMED",,F_IMMED,0x80
+defconst "F_HIDDEN",,F_HIDDEN,0x20
+defconst "F_LENMASK",,F_LENMASK,0x1f
+defconst "TRUE",,TRUE,0xFFFF
+defconst "FALSE",,FALSE,0x0
+
+; Returns from current word and starts executing the top of the return stack.
+defcode "EXIT",,EXIT
+  POPRSP IP_LREG
+  rjmp NEXT
+
+defcode "LIT",,LIT
+  ; Push the next word onto the data stack.
+  movw ZL, IP_LREG
+  adiw IP_LREG, 2
+  lpm r0, Z+
+  lpm r1, Z
+  PUSHDSP 0
+  rjmp NEXT
 
 ; LEN ADDR -- NAMEPTR
 defword "FIND",,FIND
@@ -962,7 +982,7 @@ defword "INTERPRET",,INTERPRET
   fw EXIT
 1:
   ; error, name not found and not a literal.
-  fw QUIT
+  fw EXIT
 
 ; The last word in the dictionary
 defvar "LATEST",,LATEST,name_LATEST

@@ -85,6 +85,7 @@ var_\label:
   rjmp NEXT
 .endm
 
+; TODO: Make this push the length on as well.
 .macro defstring name, flags=0, label, value
   defconst "\name",\flags,\label,string_\label
 string_\label :
