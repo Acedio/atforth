@@ -4,25 +4,20 @@
 
 #include <avr/io.h>
 
+#include "macros.i"
+
+#define CODEWORD_SIZE 2
+
 ; The interpreter pointer is r25:r24
-.set IP_LREG, 24
+#define IP_LREG 24
 ; The data stack pointer is Y (r28)
-.set DS_LREG, 28
-.set CODEWORD_SIZE, 2
+#define DS_LREG 28
 
-.set PS2_STATE_REG, 8
-.set PS2_DATA_REG, 9
+#define RS0 0x100
+#define DS0 0x180
 
-RS0 = 0x100
-DS0 = 0x180
-
-#define KB_BUS_PIN 0
-#define KB_CLK_PIN 4
-
-#define LCD_BUSY_PIN 0
-#define SER_DATA_PIN 1
-#define SER_CLK_PIN 2
-#define SER_LATCH_PIN 3
+; The dictionary address of the most recently defined word.
+.set link,0
 
 .text
 ; Interrupt vectors.
@@ -43,162 +38,7 @@ nop
 nop
 nop
 
-; == KEYBOARD ROUTINES ==
-
-#define PS2_ERROR 0
-#define PS2_START 1
-; 2-9 are data bits
-#define PS2_PARITY 10
-#define PS2_STOP 11
-
-#define KBUF_SIZE 0x08
-#define KBUF_MASK 0x07
-
-#define SBUF_SIZE 0x20
-
-; Interrupt called whenever the PS2 clock pin changes.
-kb_clocked:
-  ; We read the data pin when the clock falls, so return if it's high.
-  sbic _SFR_IO_ADDR(PINB), KB_CLK_PIN
-  reti
-
-  push r30
-  push r31
-  in r30, _SFR_IO_ADDR(SREG)
-  push r30
-
-  rcall kb_clk_fall
-
-  pop r30
-  out _SFR_IO_ADDR(SREG), r30
-  pop r31
-  pop r30
-  reti
-
-kb_clk_fall:
-  ; Wait ~25us because we should read the data line in between clock pulses.
-  ; TODO: Waiting is necessary but should probably let other processes continue.
-  ldi r30, 67
-1:
-  dec r30  ; 1 clk
-  brne 1b ; 2 clk on loop
-
-  ; Read bus pin
-  in r31, _SFR_IO_ADDR(PINB)
-
-  mov r30, PS2_STATE_REG
-
-  ; <= 0 is Error
-  tst r30
-  brlt ps2_error
-  breq ps2_error
-  cpi r30, PS2_START
-  breq ps2_start
-  cpi r30, PS2_PARITY
-  ; If > START and < PARITY, this is a data bit.
-  brlt ps2_data
-  breq ps2_parity
-  cpi r30, PS2_STOP
-  breq ps2_stop
-  ; Fall through to ps2_error if >PS2_STOP
-  
-ps2_error:
-  ; hold clk low for ~100us
-  sbi _SFR_IO_ADDR(DDRB), KB_CLK_PIN
-  cbi _SFR_IO_ADDR(PORTB), KB_CLK_PIN
-  clr r30
-1:
-  dec r30  ; 1 clk
-  brne 1b ; 2 clk on loop
-  ; release clk, enable pullup
-  cbi _SFR_IO_ADDR(DDRB), KB_CLK_PIN
-  sbi _SFR_IO_ADDR(PORTB), KB_CLK_PIN
-
-  ; reset status register
-  ldi r30, PS2_START
-  mov PS2_STATE_REG, r30
-  ret
-ps2_start:
-  ; Start bit is low.
-  andi r31, _BV(KB_BUS_PIN)
-  brne ps2_error ; nz = error
-  clr PS2_DATA_REG
-  inc PS2_STATE_REG
-  ret
-ps2_data: ; low bit first
-  ; Put bit into carry
-  clc
-  sbrc r31, KB_BUS_PIN
-  sec
-  ror PS2_DATA_REG ; rotate carry into high bit of data register
-  inc PS2_STATE_REG
-  ret
-ps2_parity:
-  andi r31, _BV(KB_BUS_PIN)
-  ; This could probably be more efficient.
-  ; Basically, if we EOR all bits together we should get a 1 (odd parity).
-  eor r31, PS2_DATA_REG ; Combine the parity bit into the data register.
-  mov r30, r31
-  swap r30     ; swap nibbles
-  eor r31, r30 ; eor high nibble into low nibble
-  mov r30, r31
-  lsr r30
-  lsr r30
-  eor r31, r30 ; eor bits 2-3 into bits 0-1
-  mov r30, r31
-  lsr r30
-  eor r31, r30 ; eor bit 1 into bit 0
-  sbrs r31, 0  ; Lowest bit should be 1 now (with the parity bit parity is odd)
-  rjmp ps2_error
-  inc PS2_STATE_REG
-  ret
-ps2_stop:
-  ; Stop bit is high.
-  andi r31, _BV(KB_BUS_PIN)
-  breq ps2_error ; zero = error
-
-  ; KBIN is an index and only uses the lo8.
-  ldi r30, lo8(var_KBIN)
-  ldi r31, hi8(var_KBIN)
-  ; Using PS2_STATE_REG as temporary storage here since it will be reset later.
-  ld PS2_STATE_REG, Z+
-  ldi r30, lo8(var_KBUF)
-  ldi r31, hi8(var_KBUF)
-  add r30, PS2_STATE_REG
-  st Z+, PS2_DATA_REG ; KBUF[KBIN] = PS2_DATA_REG
-
-  ; Now determine the new KBIN. It's .balign 8'd, so just mask the bottom 3 bits
-  andi r30, KBUF_MASK
-  mov PS2_STATE_REG, r30
-  ldi r30, lo8(var_KBIN)
-  ldi r31, hi8(var_KBIN)
-  st Z, PS2_STATE_REG
-  
-  ldi r30, PS2_START
-  mov PS2_STATE_REG, r30
-  ret
-
-; Must use the register number (e.g. 24 instead of r24)
-.macro PUSHRSP reg
-  push \reg
-  push \reg + 1
-.endm
-
-.macro POPRSP reg
-  pop \reg + 1
-  pop \reg
-.endm
-
-.macro PUSHDSP reg
-  st -Y, \reg
-  st -Y, \reg + 1
-.endm
-
-.macro POPDSP reg
-  ld \reg + 1, Y+
-  ld \reg, Y+
-.endm
-
+.global DOCOL
 DOCOL:
   PUSHRSP IP_LREG
   ; r23:22 contains the codeword's address.
@@ -206,6 +46,7 @@ DOCOL:
   ; Skip past the codeword to get to the first token.
   adiw IP_LREG, CODEWORD_SIZE
 ; Execute NEXT immediately.
+.global NEXT
 NEXT:
   ; Load the next token, which is an offset into the token table.
   movw ZL, IP_LREG ; load the address of the next token
@@ -247,20 +88,6 @@ main:
   ; Call NEXT to kick things off.
   rjmp NEXT
 
-.macro fw name
-  .byte T_\name - TOKEN_TABLE
-.endm
-
-.macro lit word
-  fw LIT
-  .word \word
-.endm
-
-.macro zbranch rel
-  fw ZBRANCH
-  .word \rel - . - 2
-.endm
-
 ; The default program!
 cold_start:
   ; Wait because the keyboard is noisy on the busy line (TODO: I think?)
@@ -275,46 +102,6 @@ cold_start:
   fw LEDSTORE
 
   fw QUIT
-
-.set link,0
-
-.macro defword name, flags=0, label
-  .text
-  .balign 2
-  .global name_\label
-name_\label :
-  .word link ; link to the previously defined word
-  .set link,name_\label
-  ; TODO: ORing defconst flags together doesn't seem to work.
-  .byte \flags|(nameend_\label - . - 1) ; flags + length of the name
-  .ascii "\name" ; the name
-nameend_\label :
-  .balign 2
-  .global \label
-\label :
-  .word pm(DOCOL) ; Codeword
-  ; list of word tokens follow
-.endm
-
-.macro defcode name, flags=0, label
-  .text
-  .balign 2
-  .global name_\label
-name_\label :
-  .word link ; link to the previously defined word
-  .set link,name_\label
-  .byte \flags|(nameend_\label - . - 1) ; flags + length of the name
-  .ascii "\name" ; the name
-nameend_\label :
-  .balign 2
-  .global \label
-\label :
-  .word pm(code_\label) ; Codeword
-  .balign 2
-  .global code_\label
-code_\label :
-  ; list of word tokens follow
-.endm
 
 ; D: T R:
 defword "WAIT",,WAIT
@@ -375,24 +162,6 @@ defword "BLINK",,BLINK
 
   fw FALSE
   zbranch 1b
-
-; Blink latch pin indefinitely.
-; Useful to call from ASM when the kernel might be dead.
-defcode "LATCHBLINK",,LATCHBLINK
-  ldi r26, 0
-  ldi r27, 0
-  ldi r18, 0
-1:
-  adiw r26, 1
-  brne 1b ; loop if not 0
-  inc r18
-  sbrs r18, 3
-  rjmp 2f
-  sbi _SFR_IO_ADDR(PORTB), SER_LATCH_PIN
-  rjmp 1b
-2:
-  cbi _SFR_IO_ADDR(PORTB), SER_LATCH_PIN
-  rjmp 1b
 
 defcode "DROP",,DROP
   adiw Y, 2
@@ -644,39 +413,9 @@ defword "@",,FETCH
   fw OR
   fw EXIT
 
-.macro defvar name, flags=0, label, initial=0
-  defcode \name,\flags,\label
-  ldi r16, lo8(var_\label)
-  ldi r17, hi8(var_\label)
-  PUSHDSP 16
-  rjmp NEXT
-  .data
-var_\label:
-  .word \initial
-  .text
-.endm
-
 defvar "STATE",,STATE
 defvar "HERE",,HERE
 defvar "S0",,SZ,DS0
-
-; KBUF is a ring buffer that stores keyboard input. KBIN and KBOUT are indices
-; into the buffer. KBIN is where the next byte will be written, KBOUT is where
-; the next byte should be read. The buffer is empty when KBIN = KBOUT.
-; TODO: Could store these together in the same word.
-defvar "KBIN",,KBIN,0
-defvar "KBOUT",,KBOUT,0
-
-defcode "KBUF",,KBUF
-  ldi r16, lo8(var_KBUF)
-  ldi r17, hi8(var_KBUF)
-  PUSHDSP 16
-  rjmp NEXT
-.data
-.balign KBUF_SIZE
-var_KBUF:
-.fill KBUF_SIZE, 1, 0
-.text
 
 defcode "RAMINIT",,RAMINIT
   ldi ZL, lo8(__data_load_start)
@@ -694,15 +433,6 @@ defcode "RAMINIT",,RAMINIT
   brne 1b
   rjmp NEXT
 
-.macro defconst name, flags=0, label, value
-  .set value_\name, value
-  defcode \name,\flags,\label
-  ldi r16, lo8(\value)
-  ldi r17, hi8(\value)
-  PUSHDSP 16
-  rjmp NEXT
-.endm
-
 defconst "R0",,RZ,RS0
 defconst "DOCOL",,__DOCOL,DOCOL
 defconst "F_IMMED",,F_IMMED,0x80
@@ -710,12 +440,6 @@ defconst "F_HIDDEN",,F_HIDDEN,0x20
 defconst "F_LENMASK",,F_LENMASK,0x1f
 defconst "TRUE",,TRUE,0xFFFF
 defconst "FALSE",,FALSE,0x0
-
-.macro defstring name, flags=0, label, value
-  defconst "\name",\flags,\label,string_\label
-string_\label :
-  .string "\value"
-.endm
 
 defstring "GREETING",,GREETING,"Hello, world!"
 
@@ -811,98 +535,6 @@ defword "WHILE",,WHILE
   ; Maybe conditionally RDROP so the caller doesn't have to?
   fw EXIT
 
-defcode "KBINIT",,KBINIT
-  ; Set bus pin as input and enable pull-up.
-  cbi _SFR_IO_ADDR(DDRB), KB_BUS_PIN
-  sbi _SFR_IO_ADDR(PORTB), KB_BUS_PIN
-  ; Initialize the state machine.
-  ldi r16, PS2_START
-  mov PS2_STATE_REG, r16
-  rjmp KBDISABLE
-
-defcode "KBDISABLE",,KBDISABLE
-  cli
-  clr r16
-  out _SFR_IO_ADDR(GIMSK), r16
-  out _SFR_IO_ADDR(PCMSK), r16
-  ; Clear the interrupt flag by writing one to it.
-  ldi r16, _BV(PCIF)
-  out _SFR_IO_ADDR(GIFR), r16
-  ; Holding the clock low disables the keyboard.
-  sbi _SFR_IO_ADDR(DDRB), KB_CLK_PIN
-  cbi _SFR_IO_ADDR(PORTB), KB_CLK_PIN
-  ; Wait ~100us to ensure the keyboard isn't sending other commands
-  ; (1/8000000 seconds * 256 loops * 3 clocks per loop = 96us)
-  ldi r16, 0
-1:
-  dec r16 ; 1 clk
-  brne 1b ; 2 clk on loop
-  rjmp NEXT
-
-defcode "KBENABLE",,KBENABLE
-  ; Set CLK as input and enable pullups.
-  cbi _SFR_IO_ADDR(DDRB), KB_CLK_PIN
-  sbi _SFR_IO_ADDR(PORTB), KB_CLK_PIN
-  ; Clear any pending interrupts.
-  ldi r16, _BV(PCIF)
-  out _SFR_IO_ADDR(GIFR), r16
-  ; Enable pin change interrupts on CLK pin.
-  sbi _SFR_IO_ADDR(PCMSK), KB_CLK_PIN
-  ldi r16, _BV(PCIE)
-  out _SFR_IO_ADDR(GIMSK), r16
-  sei
-  rjmp NEXT
-
-defword "KB@",,KBFETCH
-  fw KBOUT
-  fw FETCH
-1:
-  fw DUP
-  fw KBIN
-  fw FETCH
-  fw SUB
-  zbranch 1b
-
-  ; Increment KBOUT
-  fw DUP
-  fw INCR
-  lit KBUF_MASK
-  fw AND
-  fw KBOUT
-  fw STORE
-
-  ; Read the input
-  fw KBUF
-  fw ADD
-  fw FETCHBYTE
-
-  fw EXIT
-
-KB_MAP:
-.ascii \
-  "\0\0\0\0\0\0\0\0\0\0\0\0\0\0`\0",\
-  "\0\0\0\0\0q1\0\0\0zsaw2\0",\
-  "\0cxde43\0\0 vftr5\0",\
-  "\0nbhgy6\0\0\0mju78\0",\
-  "\0,kio09\0\0./l;p-\0",\
-  "\0\0'\0[=\0\0\0\0\0]\0\\\0\0"
-.set KB_MAP_LEN, . - KB_MAP
-
-KB_MAP_SHIFT:
-.ascii \
-  "\0\0\0\0\0\0\0\0\0\0\0\0\0\0~\0",\
-  "\0\0\0\0\0Q!\0\0\0ZSAW@\0",\
-  "\0CXDE$#\0\0 VFTR%\0",\
-  "\0NBHGY^\0\0\0MJU&*\0",\
-  "\0<KIO)(\0\0>?L:P_\0",\
-  "\0\0\"\0{+\0\0\0\0\0}\0|\0\0"
-
-defvar "KBSTATUS",,KBSTATUS,0
-defconst "KBS_BREAK",,KBS_BREAK,0x0001
-defconst "KBS_EXTENDED",,KBS_EXTENDED,0x0002
-defconst "KBS_LSHIFT",,KBS_LSHIFT,0x0004
-defconst "KBS_RSHIFT",,KBS_RSHIFT,0x0008
-
 ; FLAGSVAR FLAG --
 defword "SETFLAG",,SETFLAG
   fw SWAP
@@ -932,138 +564,7 @@ defword "CHECKFLAG",,CHECKFLAG
   fw ZEQU
   fw EXIT
 
-; MODFLAG --
-; If KBS_BREAK is set, clear MODFLAG. Otherwise, set it.
-defword "HANDLEMOD",,HANDLEMOD
-  fw KBSTATUS
-
-  fw KBS_BREAK
-  fw KBSTATUS
-  fw CHECKFLAG
-  zbranch 1f
-  fw CLRFLAG
-  fw FALSE
-  zbranch 2f
-1:
-
-  fw SETFLAG
-2:
-
-  fw RESETKB
-  fw EXIT
-
-defword "RESETKB",,RESETKB
-  ; Reset the scancode prefixes.
-  fw KBS_BREAK
-  fw KBS_EXTENDED
-  fw OR
-  fw KBSTATUS
-  fw CLRFLAG
-  fw EXIT
-
-defword "KEY",,KEY
-key_top:
-  fw KBFETCH
-
-  fw DUP
-  lit 0xF0 ; break codes
-  fw EQU
-  zbranch 1f
-  fw DROP
-  fw KBS_BREAK
-  fw KBSTATUS
-  fw SETFLAG
-  fw FALSE
-  zbranch key_top
-1:
-
-  fw DUP
-  lit 0xE0 ; extended keys
-  fw EQU
-  zbranch 1f
-  fw DROP
-  fw KBS_EXTENDED
-  fw KBSTATUS
-  fw SETFLAG
-  fw FALSE
-  zbranch key_top
-1:
-
-  fw DUP
-  lit 0x12 ; left shift
-  fw EQU
-  zbranch 1f
-  fw DROP
-
-  fw KBS_LSHIFT
-  fw HANDLEMOD
-  fw RESETKB
-
-  fw FALSE
-  zbranch key_top
-1:
-
-  fw DUP
-  lit 0x59 ; right shift
-  fw EQU
-  zbranch 1f
-  fw DROP
-
-  fw KBS_RSHIFT
-  fw HANDLEMOD
-  fw RESETKB
-
-  fw FALSE
-  zbranch key_top
-1:
-
-  ; Past this point, we're always matching a real key and not a modifier key
-  ; (even though we might not handle it).
-  fw KBS_BREAK
-  fw KBS_EXTENDED
-  fw OR
-  fw KBSTATUS
-  fw CHECKFLAG
-  zbranch 1f
-  fw DROP ; Throw out the break and extended codes.
-  fw RESETKB
-  fw FALSE
-  zbranch key_top
-1:
-  ; Past this point, BREAK and EXTENDED are not set.
-
-  ; Verify it's within the map size.
-  fw DUP
-  lit KB_MAP_LEN
-  fw GT
-  fw ZEQU
-  zbranch 1f ; if KB_MAP_LEN <= keycode
-  fw DROP
-  fw FALSE
-  zbranch key_top
-1:
-
-  ; Determine which map to use.
-  lit KB_MAP
-  fw KBS_LSHIFT
-  fw KBS_RSHIFT
-  fw OR
-  fw KBSTATUS
-  fw CHECKFLAG
-  zbranch 1f
-  fw DROP
-  lit KB_MAP_SHIFT
-1:
-
-  fw ADD
-  fw ROMFETCHBYTE ; KB_MAP[keycode]
-  fw DUP
-  fw ZEQU
-  zbranch 1f
-  ; Char is zero in the map and isn't handled.
-  zbranch key_top
-1:
-  fw EXIT
+#define SBUF_SIZE 0x20
 
 defcode "SBUF",,SBUF
   ldi r16, lo8(var_SBUF)
@@ -1205,133 +706,10 @@ defword "NUMBER",,NUMBER
   fw TRUE
   fw EXIT
 
-defconst "LCD_E",,LCD_E,0x80
-defconst "LCD_RW_READ",,LCD_RW_READ,0x40
-defconst "LCD_RS_DR",,LCD_RS_DR,0x20
-defconst "LCD_LED",,LCD_LED,0x10
-
-defcode "SERINIT",,SERINIT
-  cbi _SFR_IO_ADDR(DDRB), LCD_BUSY_PIN
-  sbi _SFR_IO_ADDR(PORTB), LCD_BUSY_PIN
-
-  ; CLK, LATCH, and OUT are always outputs.
-  sbi _SFR_IO_ADDR(DDRB), SER_CLK_PIN
-  sbi _SFR_IO_ADDR(DDRB), SER_LATCH_PIN
-  sbi _SFR_IO_ADDR(DDRB), SER_DATA_PIN
-  ; Init all to low.
-  cbi _SFR_IO_ADDR(PORTB), SER_CLK_PIN
-  cbi _SFR_IO_ADDR(PORTB), SER_LATCH_PIN
-  cbi _SFR_IO_ADDR(PORTB), SER_DATA_PIN
-  rjmp NEXT
-
-defcode "SERLATCH",,SERLATCH
-  cbi _SFR_IO_ADDR(PORTB), SER_LATCH_PIN
-  sbi _SFR_IO_ADDR(PORTB), SER_LATCH_PIN
-  rjmp NEXT
-
-; Must set the LCD to LCD_RW_READ first.
-defcode "LCDBUSY",,LCDBUSY
-  ldi r16, 0
-  sbic _SFR_IO_ADDR(PINB), LCD_BUSY_PIN
-  ldi r16, 0xFF ; port is busy
-  mov r17, r16
-  PUSHDSP 16
-  rjmp NEXT
-
-defcode "B>SER",,BYTETOSER
-  POPDSP 0
-  ; Load the byte into the data register.
-  out _SFR_IO_ADDR(USIDR), r0
-  ; Reset the clock counter.
-  ldi r16, _BV(USIOIF)
-  out _SFR_IO_ADDR(USISR), r16
-
-  ; Pulse clock until sent.
-  ldi r16, _BV(USIWM0) | _BV(USICS1) | _BV(USICLK) | _BV(USITC)
-1:
-  out _SFR_IO_ADDR(USICR), r16
-  sbis _SFR_IO_ADDR(USISR), USIOIF
-  rjmp 1b
-
-  ; Turn off USI.
-  ldi r16, 0
-  out _SFR_IO_ADDR(USICR), r16
-  rjmp NEXT
-
-; Writes a word to the shift registers.
-defword ">SER",,TOSER
-  ; High byte first.
-  fw DUP
-  fw SWIZZLE
-  fw BYTETOSER
-
-  ; Then the low byte.
-  fw BYTETOSER
-
-  fw SERLATCH
-  fw EXIT
-
-defword "LCDWAIT",,LCDWAIT
-1:
-  fw LCD_RW_READ
-  fw TOSER
-  fw LCD_RW_READ
-  fw LCD_E
-  fw OR
-  fw TOSER
-  fw LCDBUSY
-  fw ZEQU
-  zbranch 1b
-
-  ; Bring LCD_E low so it's in a consistent state.
-  fw LCD_RW_READ
-  fw TOSER
-  fw EXIT
-
-; Writes an LCD command to the shift register and handles the clocking of E.
-defword "LCDCMD",,LCDCMD
-  fw LCDWAIT ; Wait for free.
-
-  fw DUP
-  fw LCD_E
-  fw OR
-  fw TOSER ; Clock E high first (should already be low).
-
-  fw LCD_E
-  fw INVERT
-  fw AND
-  fw TOSER ; Then low.
-
-  fw EXIT
-
-defword "LCDINIT",,LCDINIT
-  ; 8 bits, 2 lines, 5x8
-  lit 0x3800
-  fw LCDCMD
-  ; clear the screen
-  lit 0x0100
-  fw LCDCMD
-  ; Enable screen, cursor, and blinking
-  lit 0x0F00
-  fw LCDCMD
-  fw LCDDISABLE
-  fw EXIT
-
 defword "EMIT",,EMIT
   fw SWIZZLE   ; Put char in high byte.
   fw LCD_RS_DR ; Data register.
   fw OR
-  fw LCDCMD
-  fw EXIT
-
-; Hold the address lines high so the busy pin can be used by other devices.
-defword "LCDDISABLE",,LCDDISABLE
-  lit 0xFF00
-  fw TOSER
-  fw EXIT
-
-defword "LCDCLEAR",,LCDCLEAR
-  lit 0x0100
   fw LCDCMD
   fw EXIT
 
@@ -1588,9 +966,3 @@ defword "INTERPRET",,INTERPRET
 
 ; The last word in the dictionary
 defvar "LATEST",,LATEST,name_LATEST
-
-; High byte is address and is sent first.
-.text
-.balign 256
-TOKEN_TABLE:
-.include "token_table.i"

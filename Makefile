@@ -2,32 +2,25 @@ MCU_TARGET     = attiny85
 OPTIMIZE       = -Os
 CC             = avr-gcc
 
-override CFLAGS        = -Wall $(OPTIMIZE) -mmcu=$(MCU_TARGET)
 override AFLAGS        = -nostdlib -Wall -mmcu=$(MCU_TARGET)
 override LDFLAGS       = -Wl,-Tdata,0x800180
 
-all: atterm.hex forth.hex
+all: forth.hex
 
-keyboard.o: keyboard.h
+forth.o: token_table.i
 
-lcd.o: lcd.h
-
-atterm.elf: keyboard.o lcd.o
-
-forth.o: forth.S token_table.i
-
-token_table.i: forth.S
-	< forth.S grep -E "^def(code|word|var|const|string)" \
-	| sed "s/^[^,]*,[^,]*,// ; s/[^A-Z_].*// ; s/\(.*\)/T_\1: .word \1/" > $@
-
-%.elf: %.o
-	$(CC) $(LDFLAGS) -o $@ $^
+# forth.S must be last in order to ensure LATEST is last.
+token_table.S: token_table.i kb.S lcd.S forth.S
+	cp token_table.i $@
+	cat kb.S lcd.S forth.S \
+	| grep -E "^def(code|word|var|const|string)" \
+	| sed "s/^[^,]*,[^,]*,// ; s/[^A-Z_].*// ; s/\(.*\)/.global T_\1\n.set T_\1,.-TOKEN_TABLE\n.word \1/" >> $@
 
 %.o: %.S
 	$(CC) -c $(AFLAGS) -o $@ $<
 
-%.o: %.c
-	$(CC) -c $(CFLAGS) $(LDFLAGS) -o $@ $<
+forth.elf: forth.o kb.o lcd.o token_table.o
+	$(CC) $(LDFLAGS) -o $@ $^
 
 %.hex: %.elf
 	avr-objcopy -j .text -j .data -O ihex $< $@
@@ -39,4 +32,4 @@ clean:
 	rm -rf *.o
 	rm -rf *.hex
 	rm -rf *.elf
-	rm token_table.i
+	rm token_table.S
