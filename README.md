@@ -17,9 +17,9 @@
 
 ## ATTiny85 Port Assignment
 
-PB0 - LCD busy pin and the MSB of the LCD bus.
-PB1 - Serial out to the shift registers.
-PB2 - Clock for serial input on the shift registers.
-PB3 - Clock for the outputs on the shift registers.
-PB4 - PS/2 clock.
-PB5 - Reset pin, left open for programming.
+* PB0 - LCD busy pin and the MSB of the LCD bus.
+* PB1 - Serial out to the shift registers.
+* PB2 - Clock for serial input on the shift registers.
+* PB3 - Clock for the outputs on the shift registers.
+* PB4 - PS/2 clock.
+* PB5 - Reset pin, left open for programming.
