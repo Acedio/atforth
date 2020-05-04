@@ -94,6 +94,7 @@ forth_main:
   lit 0x3FFF
   fw WAIT
   fw RAMINIT
+  fw RESETPGW
   fw SERINIT
   fw LCDINIT
   fw KBINIT
@@ -834,7 +835,6 @@ defword "STREQU",,STREQU
 ; == INTERPRETING ==
 
 defvar "STATE",,STATE
-defvar "HERE",,HERE
 defvar "S0",,SZ,DS0
 
 defconst "R0",,RZ,RS0
@@ -947,7 +947,7 @@ defcode "__EXE",,__EXE
   movw ZL, r20
   ijmp
 
-; xt -- R: codeword
+; xt --
 defword "EXECUTE",,EXECUTE
   fw TOCFA
   fw __EXE
@@ -970,6 +970,10 @@ defword "INTERPRET",,INTERPRET
   fw NROT
   fw TWODROP ; drop name
   fw EXECUTE
+  lit ' '
+  fw EMIT
+  fw DUP
+  fw WRITEWORD
   fw EXIT
 1:
   fw DROP ; drop zero
@@ -982,7 +986,166 @@ defword "INTERPRET",,INTERPRET
   fw EXIT
 1:
   ; error, name not found and not a literal.
+  lit '?'
+  fw EMIT
   fw EXIT
+
+; == COMPILING ==
+
+; TODO: Handle bad xts :P
+; xt -- tok
+defword ">TOK",,TOTOK
+  lit TOKEN_TABLE
+  fw DECR
+  fw DECR
+1:
+  fw INCR
+  fw INCR
+  fw TWODUP
+  fw ROMFETCH
+  fw EQU
+  zbranch 1b
+  fw SWAP
+  fw DROP
+  lit TOKEN_TABLE
+  fw SWAP
+  fw SUB
+  fw EXIT
+
+#define PGW_MASK 0x1F
+.data
+pgw_lo8_buf:
+.byte 0
+.text
+
+; TODO: Not sure if __data_load_end is always the correct address to use.
+; Can use `avr-nm forth.elf` to check for changes.
+defvar "HERE",,HERE,__data_load_end
+
+; Couple things to remember:
+;  - Do we already have a page open in the temp page? If not, need to read up to
+;    HERE of the existing data and write it into the temp page.
+;  - If it's already open, just start writing to the temp page at HERE.
+;  - We must write words, not bytes, so need to buffer lo8 byte. Also need to
+;    ensure the buffer byte is filled when we start a write in the middle of a
+;    word (e.g. the temp page is not open and HERE is waiting at byte 3).
+;  - If we fill the temp page, the flush should be triggered automatically.
+;  - A manual flush should fill the rest of the temp page (if any remains) with
+;    data that currently exists in ROM.
+
+defcode "RESETPGW",,RESETPGW
+  ; erase the temp page just in case it's in a bad state
+  ldi r17, _BV(CTPB)|_BV(SPMEN)
+  out _SFR_IO_ADDR(SPMCSR), r17
+  spm
+
+  lds ZL, var_HERE
+  lds ZH, var_HERE+1
+  ; fill the temp page up to HERE with existing bytes
+  mov r16, ZL
+  andi ZL, ~PGW_MASK ; Start at page[0]
+  rcall fill_temp_page
+
+  rjmp NEXT
+
+; Temp page must be initialized (via RESETPGW) before calling.
+; byte --
+defcode "C,",,COMMABYTE
+  lds ZL, var_HERE
+  lds ZH, var_HERE+1
+  ; Increment HERE
+  movw XL, ZL
+  adiw XL, 1
+  sts var_HERE, XL
+  sts var_HERE+1, XH
+
+  POPDSP 0 ; only lo8 (r0) matters
+
+  sbrc ZL, 0
+  rjmp 1f
+  ; If lo8 byte, save to buffer.
+  sts pgw_lo8_buf, r0
+  rjmp NEXT
+1:
+  ; This is a hi8 byte, so move byte to hi byte, load buffer, and write
+  mov r1, r0
+  lds r0, pgw_lo8_buf
+  sbiw ZL, 1 ; set Z to address of word to write
+  ldi r17, _BV(SPMEN)
+  out _SFR_IO_ADDR(SPMCSR), r17
+  spm
+
+  ; If we just wrote the last word of the page, flush.
+  mov r16, ZL
+  andi r16, PGW_MASK
+  ldi r17, PGW_MASK-1
+  cpse r16, r17
+  rjmp NEXT
+
+  ; Z still holds this last word of the page, so zero the word bits to get the
+  ; page address (the first byte).
+  andi ZL, PGW_MASK
+  rcall write_temp_page
+  rjmp NEXT
+  
+; Fill the temp page from ZL to r16. ZH remains constant. pgw_lo8_buf should be
+; filled with a spare lo8 if starting at an odd boundary.
+; On return, ZL = r16 and pgw_lo8_buf will store a spare byte if ending on an
+; odd boundary.
+; Z: start r16: until (not inclusive) pgw_lo8_buf: spare byte on odd boundary
+fill_temp_page:
+  lds r0, pgw_lo8_buf
+1:
+  cp ZL, r16
+  breq 3f
+  ; still haven't reached HERE yet.
+  ; If this is a lo8 byte, put in r0. hi8 in r1.
+  sbrc ZL, 0
+  rjmp 2f
+
+  lpm r0, Z+
+  rjmp 1b
+2:
+  lpm r1, Z
+  ; we now have both bytes of the word, so write the word.
+  sbiw ZL, 1 ; set Z to address of word to write
+  ldi r17, _BV(SPMEN)
+  out _SFR_IO_ADDR(SPMCSR), r17
+  spm
+  adiw ZL, 2 ; restore Z to start of next word
+  rjmp 1b
+3:
+  ; Save lo8 in case we didn't write it.
+  sts pgw_lo8_buf, r0
+  ret
+
+; Z: First byte of the page to write.
+write_temp_page:
+  ; Erase the page first.
+  ldi r17, _BV(PGERS)|_BV(SPMEN)
+  out _SFR_IO_ADDR(SPMCSR), r17
+  spm
+  ldi r17, _BV(PGWRT)|_BV(SPMEN)
+  out _SFR_IO_ADDR(SPMCSR), r17
+  spm
+  ret
+
+; Cause a program write to happen immediately. HERE will remain unchanged.
+; Should call RESETPGW after this if you plan to continue writing at HERE.
+defcode "FLUSHPGW",,FLUSHPGW
+  lds ZL, var_HERE
+  lds ZH, var_HERE+1
+  ; r16 is the end state of ZL, so round it up to the next page boundary.
+  mov r16, ZL
+  ldi r17, PGW_MASK
+  add r16, r17
+  andi r16, ~PGW_MASK
+  rcall fill_temp_page
+  ; Write the page. Z now holds the first byte of the next page, so subtract one
+  ; page to get the to-be-written page's address (first byte).
+  sbiw ZL, PGW_MASK + 1
+  rcall write_temp_page
+  rjmp NEXT
 
 ; The last word in the dictionary
 defvar "LATEST",,LATEST,name_LATEST

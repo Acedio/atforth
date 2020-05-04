@@ -120,10 +120,8 @@ ps2_stop:
   breq ps2_error ; zero = error
 
   ; KBIN is an index and only uses the lo8.
-  ldi r30, lo8(var_KBIN)
-  ldi r31, hi8(var_KBIN)
   ; Using PS2_STATE_REG as temporary storage here since it will be reset later.
-  ld PS2_STATE_REG, Z+
+  lds PS2_STATE_REG, var_KBIN
   ldi r30, lo8(var_KBUF)
   ldi r31, hi8(var_KBUF)
   add r30, PS2_STATE_REG
