@@ -1082,14 +1082,15 @@ defcode "C,",,COMMABYTE
   cpse r16, r17
   rjmp NEXT
 
-  ; Z still holds this last word of the page, so zero the word bits to get the
-  ; page address (the first byte).
-  andi ZL, PGW_MASK
+  ; Z still holds the address of last word of the page, so zero the word bits to
+  ; get the page address (the first byte).
+  andi ZL, ~PGW_MASK
   rcall write_temp_page
   rjmp NEXT
   
-; Fill the temp page from ZL to r16. ZH remains constant. pgw_lo8_buf should be
-; filled with a spare lo8 if starting at an odd boundary.
+; Fill the temp page, starting from Z and continuing until ZL = r16.
+; ZH remains constant. pgw_lo8_buf should be filled with a spare lo8 if starting
+; at an odd boundary.
 ; On return, ZL = r16 and pgw_lo8_buf will store a spare byte if ending on an
 ; odd boundary.
 ; Z: start r16: until (not inclusive) pgw_lo8_buf: spare byte on odd boundary
