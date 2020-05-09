@@ -14,7 +14,7 @@ token_table.S: token_table.i kb.S lcd.S forth.S
 	cp token_table.i $@
 	cat kb.S lcd.S forth.S \
 	| grep -E "^def(code|word|var|const|string)" \
-	| sed "s/^[^,]*,[^,]*,// ; s/[^A-Z_].*// ; s/\(.*\)/.global T_\1\n.set T_\1,.-TOKEN_TABLE\n.word \1/" >> $@
+	| sed "s/\".*\"//; s/^[^,]*,[^,]*,// ; s/[^A-Z_].*// ; s/\(.*\)/.global T_\1\n.set T_\1,.-TOKEN_TABLE\n.word \1/" >> $@
 
 %.o: %.S
 	$(CC) -c $(AFLAGS) -o $@ $<

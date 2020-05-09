@@ -33,7 +33,6 @@
 name_\label :
   .word link ; link to the previously defined word
   .set link,name_\label
-  ; TODO: ORing defconst flags together doesn't seem to work.
   .byte \flags|(nameend_\label - . - 1) ; flags + length of the name
   .ascii "\name" ; the name
 nameend_\label :
@@ -77,7 +76,7 @@ var_\label:
 .endm
 
 .macro defconst name, flags=0, label, value
-  .set value_\name, value
+  .set value_\name,\value
   defcode \name,\flags,\label
   ldi r16, lo8(\value)
   ldi r17, hi8(\value)

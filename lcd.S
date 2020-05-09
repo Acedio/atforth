@@ -162,3 +162,9 @@ defword "LCDCLEAR",,LCDCLEAR
   lit 0x0100
   fw LCDCMD
   fw EXIT
+
+; Move the cursor to the beginning of the second line.
+defword "LCDLINE",,LCDLINE
+  lit 0xC000
+  fw LCDCMD
+  fw EXIT

@@ -584,6 +584,7 @@ var_SBUF:
 
 defstring "GREETING",,GREETING,"Hello, world!"
 
+; -- length addr
 defword "WORD",,WORD
 1:
   fw KEY
@@ -649,8 +650,7 @@ defword "WRITEWORD",,WRITEWORD
   fw DUP
   fw ZEQU
   zbranch 1b
-  fw DROP
-  fw DROP
+  fw TWODROP
   fw EXIT
 
 ; LEN ADDR --
@@ -668,8 +668,7 @@ defword "TELL",,TELL
   fw FALSE
   zbranch 1b
 2:
-  fw DROP
-  fw DROP
+  fw TWODROP
   fw EXIT
 
 ; == STRINGS ==
@@ -763,8 +762,7 @@ defword "NUMBER",,NUMBER
   fw DUP
   fw ZEQU
   zbranch 2b
-  fw DROP
-  fw DROP
+  fw TWODROP
   fw FROMR
   fw TRUE
   fw EXIT
@@ -834,16 +832,15 @@ defword "STREQU",,STREQU
 
 ; == INTERPRETING ==
 
-defvar "STATE",,STATE
-defvar "S0",,SZ,DS0
-
 defconst "R0",,RZ,RS0
-defconst "DOCOL",,__DOCOL,DOCOL
 defconst "F_IMMED",,F_IMMED,0x80
 defconst "F_HIDDEN",,F_HIDDEN,0x20
 defconst "F_LENMASK",,F_LENMASK,0x1f
-defconst "TRUE",,TRUE,0xFFFF
-defconst "FALSE",,FALSE,0x0
+defconst "TRUE",,TRUE,-1
+defconst "FALSE",,FALSE,0
+
+defvar "STATE",,STATE,value_FALSE
+defvar "S0",,SZ,DS0
 
 ; Returns from current word and starts executing the top of the return stack.
 defcode "EXIT",,EXIT
@@ -882,8 +879,7 @@ defword "FIND",,FIND
   fw STREQU
 
   zbranch 2f
-  fw DROP
-  fw DROP
+  fw TWODROP
   fw FROMR ; Found it!
   fw EXIT
 2:
@@ -895,8 +891,7 @@ defword "FIND",,FIND
   fw ZEQU
   zbranch 2f
   fw NROT ; save the zero
-  fw DROP
-  fw DROP
+  fw TWODROP
   fw EXIT
 2:
   
@@ -966,26 +961,58 @@ defword "INTERPRET",,INTERPRET
   fw FIND
   fw DUP
   zbranch 1f
-  ; found word, execute it
+  ; found word
   fw NROT
   fw TWODROP ; drop name
+
+  fw DUP ; xt xt
+  fw INCR
+  fw INCR
+  fw ROMFETCHBYTE ; Get len|flags
+  fw F_IMMED
+  fw AND
+  fw ZEQU ; !IMMED xt
+
+  fw STATE
+  fw FETCH
+  fw AND ; !IMMED&&COMPILING xt
+  zbranch 2f
+  ; STATE = compiling
+  fw TOTOK
+  fw COMMABYTE
+  fw EXIT
+2:
+  ; STATE = executing
   fw EXECUTE
+  fw LCDLINE
+  fw DSPFETCH
+  fw WRITEWORD
   lit ' '
   fw EMIT
   fw DUP
   fw WRITEWORD
   fw EXIT
 1:
-  fw DROP ; drop zero
+  ; Name not found, try and parse number
+  fw DROP ; drop zero nameptr
 
-  fw TWODUP
   fw NUMBER
   zbranch 1f
-  fw NROT ; Leave number on stack
-  fw TWODROP
+  ; Parse success.
+  fw STATE
+  fw FETCH
+  zbranch 2f
+  ; state = compiling, add LIT.
+  lit T_LIT
+  fw COMMABYTE
+  fw COMMA
+  fw EXIT
+2:
+  ; state = executing, leave number on stack
   fw EXIT
 1:
   ; error, name not found and not a literal.
+  fw DROP ; Drop the bad NUMBER result.
   lit '?'
   fw EMIT
   fw EXIT
@@ -995,6 +1022,7 @@ defword "INTERPRET",,INTERPRET
 ; TODO: Handle bad xts :P
 ; xt -- tok
 defword ">TOK",,TOTOK
+  fw TOCFA
   lit TOKEN_TABLE
   fw DECR
   fw DECR
@@ -1012,7 +1040,8 @@ defword ">TOK",,TOTOK
   fw SUB
   fw EXIT
 
-#define PGW_MASK 0x1F
+; 32 words (64 bytes) per page
+#define PGW_MASK 0x3F
 .data
 pgw_lo8_buf:
 .byte 0
@@ -1048,7 +1077,8 @@ defcode "RESETPGW",,RESETPGW
 
   rjmp NEXT
 
-; Temp page must be initialized (via RESETPGW) before calling.
+; Temp page must be initialized (via RESETPGW) before calling. FLUSHPGW must be
+; called before accessing written memory.
 ; byte --
 defcode "C,",,COMMABYTE
   lds ZL, var_HERE
@@ -1099,7 +1129,7 @@ fill_temp_page:
 1:
   cp ZL, r16
   breq 3f
-  ; still haven't reached HERE yet.
+  ; still haven't reached end (r16) yet.
   ; If this is a lo8 byte, put in r0. hi8 in r1.
   sbrc ZL, 0
   rjmp 2f
@@ -1136,17 +1166,104 @@ write_temp_page:
 defcode "FLUSHPGW",,FLUSHPGW
   lds ZL, var_HERE
   lds ZH, var_HERE+1
-  ; r16 is the end state of ZL, so round it up to the next page boundary.
+  ; r16 is the end state of ZL, so set it to the next page boundary.
   mov r16, ZL
-  ldi r17, PGW_MASK
+  ldi r17, PGW_MASK+1
   add r16, r17
   andi r16, ~PGW_MASK
   rcall fill_temp_page
-  ; Write the page. Z now holds the first byte of the next page, so subtract one
-  ; page to get the to-be-written page's address (first byte).
-  sbiw ZL, PGW_MASK + 1
+  ; Write the page. Z now holds the first byte of the next page, so decrement
+  ; and mask to get the to-be-written page's address (first byte).
+  sbiw ZL, 1
+  andi ZL, ~PGW_MASK
   rcall write_temp_page
   rjmp NEXT
+
+defword "PAD",,PAD
+  fw HERE
+  fw FETCH
+  lit 1
+  fw AND
+  zbranch 1f
+  lit 0
+  fw COMMABYTE
+1:
+  fw EXIT
+
+; Not word aligned.
+defword ",",,COMMA
+  fw DUP
+  fw COMMABYTE ; Low byte
+  fw SWIZZLE
+  fw COMMABYTE ; High byte
+  fw EXIT
+
+defword "CREATE",,CREATE
+  fw PAD ; Always start on a word boundary.
+  ; Save the current value of HERE, which will become the new LATEST.
+  fw HERE
+  fw FETCH  ; HERE
+  ; Add the LINK, which is equal to LATEST.
+  fw LATEST ; &LATEST HERE
+  fw FETCH ; LATEST HERE
+  fw COMMA ; HERE
+  fw LATEST ; Update LATEST to point to this word's LINK (old HERE).
+  fw STORE
+
+  fw LCDDISABLE
+  fw KBENABLE
+  fw WORD
+  fw KBDISABLE
+  fw DUP ; LEN LEN ADDR
+  fw COMMABYTE ; Store length (TODO: and flags)
+1: ; LEN ADDR
+  fw SWAP ; ADDR LEN
+  fw DUP ; ADDR ADDR LEN
+  fw FETCHBYTE ; *ADDR ADDR LEN
+  fw COMMABYTE ; ADDR LEN
+  fw INCR ; ADDR+1 LEN
+
+  fw SWAP
+  fw DECR ; LEN-1 ADDR+1
+  fw DUP ; LEN-1 LEN-1 ADDR+1
+  fw ZEQU ; ZERO LEN-1 ADDR+1
+  zbranch 1b
+
+  fw TWODROP
+
+  ; Add a byte of padding if we're not on a word boundary.
+  fw PAD
+  fw FLUSHPGW
+  fw RESETPGW
+  ; TODO: Update token table, too.
+  fw EXIT
+
+defword "[",value_F_IMMED,LBRAC
+  fw FALSE
+  fw STATE
+  fw STORE
+  fw EXIT
+
+defword "]",,RBRAC
+  fw TRUE
+  fw STATE
+  fw STORE
+  fw EXIT
+
+defword ":",,COLON
+  fw CREATE
+  lit pm(DOCOL)
+  fw COMMA
+  fw RBRAC
+  fw EXIT
+
+defword ";",value_F_IMMED,SEMICOLON
+  lit T_EXIT
+  fw COMMABYTE
+  fw LBRAC
+  fw FLUSHPGW
+  fw RESETPGW
+  fw EXIT
 
 ; The last word in the dictionary
 defvar "LATEST",,LATEST,name_LATEST
